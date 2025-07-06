@@ -1,10 +1,38 @@
 resource "libvirt_volume" "k8s_nodes_volume" {
     for_each = var.vms_configurations
 
-    name = "k8s-${each.key}-volume"
+    name = "k8s-${each.key}-node-volume"
     pool = "default"
     source = var.base_os_image
-    format = "raw"
+    format = "qcow2"
+}
+
+# The default size will be the size of the source argument value so,
+# this null_resource is being used for resizing the created volume
+# please see documentation for libvirt_volume
+# please make sure you have the sudo priviliges else you may comment out this resource block
+# and the depends argument in the libvirt_domain resource block
+locals {
+  vm_nodes_to_resize = {
+    for name, config in var.vms_configurations :
+    name => config
+    if config.resize_storage == true
+  }
+}
+resource "null_resource" "resize_k8s_nodes_volume" {
+  for_each = local.vm_nodes_to_resize
+#  for_each = var.vms_configurations
+
+  depends_on = [libvirt_volume.k8s_nodes_volume]
+
+  provisioner "local-exec" {
+    command = <<EOT
+      VOLUME_PATH=$(virsh vol-path k8s-${each.key}-node-volume --pool default)
+      sudo qemu-img resize -f qcow2 "$${VOLUME_PATH}" ${each.value.storage}
+      sudo chown libvirt-qemu:kvm "$${VOLUME_PATH}"
+      sudo chmod 0644 "$${VOLUME_PATH}"
+    EOT
+  }
 }
 
 resource "libvirt_network" "k8s_network" {
@@ -15,7 +43,7 @@ resource "libvirt_network" "k8s_network" {
 }
 
 module "ssh_keys" {
-  source = "./ssh_keys"
+  source = "./ssh-keys"
 }
 
 resource "libvirt_cloudinit_disk" "k8s_nodes_cloudinit" {
@@ -36,7 +64,9 @@ resource "libvirt_domain" "k8s_nodes" {
     name = "k8s-${each.key}-node"
     memory = each.value.memory
     vcpu = each.value.cpus
-
+    
+    depends_on = [libvirt_volume.k8s_nodes_volume, null_resource.resize_k8s_nodes_volume]
+    
     disk{
         volume_id = libvirt_volume.k8s_nodes_volume[each.key].id
     }

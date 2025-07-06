@@ -31,3 +31,4 @@ write_files:
 
 runcmd:
   - netplan apply
+  
